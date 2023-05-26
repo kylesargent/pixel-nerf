@@ -17,7 +17,9 @@ sys.path.insert(
 import torch
 import numpy as np
 import imageio
-import skimage.measure
+# import skimage.measure
+from skimage.metrics import structural_similarity as compare_ssim
+from skimage.metrics import peak_signal_noise_ratio as compare_psnr
 import util
 from data import get_split_dataset
 from render import NeRFRenderer
@@ -100,7 +102,7 @@ random_source = NS == 1 and source[0] == -1
 with torch.no_grad():
     for data in tqdm.tqdm(data_loader, total=len(data_loader)):
         images = data["images"]  # (SB, NV, 3, H, W)
-        masks = data["masks"]  # (SB, NV, 1, H, W)
+        # masks = data["masks"]  # (SB, NV, 1, H, W)
         poses = data["poses"]  # (SB, NV, 4, 4)
         focal = data["focal"][0]
 
@@ -140,10 +142,10 @@ with torch.no_grad():
         rgb_gt_all = images_gt.permute(0, 2, 3, 1).contiguous().numpy()
 
         for sb in range(SB):
-            ssim = skimage.measure.compare_ssim(
+            ssim = compare_ssim(
                 rgb_fine[sb], rgb_gt_all[sb], multichannel=True, data_range=1
             )
-            psnr = skimage.measure.compare_psnr(
+            psnr = compare_psnr(
                 rgb_fine[sb], rgb_gt_all[sb], data_range=1
             )
             total_ssim += ssim

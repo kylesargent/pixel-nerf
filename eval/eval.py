@@ -13,7 +13,10 @@ sys.path.insert(
 import torch
 import numpy as np
 import imageio
-import skimage.measure
+# import skimage.measure
+from skimage.metrics import structural_similarity as compare_ssim
+from skimage.metrics import peak_signal_noise_ratio as compare_psnr
+
 import util
 from data import get_split_dataset
 from model import make_model
