@@ -19,6 +19,9 @@ import numpy as np
 import torch
 import imageio
 import json
+from skimage.metrics import structural_similarity as compare_ssim
+from skimage.metrics import peak_signal_noise_ratio as compare_psnr
+
 
 parser = argparse.ArgumentParser(description="Calculate PSNR for rendered images.")
 parser.add_argument(
@@ -186,8 +189,8 @@ def run_map():
     lpips_vgg = lpips.LPIPS(net="vgg").to(device=cuda)
 
     def get_metrics(rgb, gt):
-        ssim = skimage.measure.compare_ssim(rgb, gt, multichannel=True, data_range=1)
-        psnr = skimage.measure.compare_psnr(rgb, gt, data_range=1)
+        ssim = compare_ssim(rgb, gt, channel_axis=-1, data_range=1)
+        psnr = compare_psnr(rgb, gt, data_range=1)
         return psnr, ssim
 
     def isimage(path):
