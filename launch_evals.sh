@@ -1,4 +1,7 @@
 #!/bin/bash
+# mipnerf360 worldscale: .3
+# dtu worldscale: .5
+
 CUDA_VISIBLE_DEVICES=0
 for worldscale in .4 .5 .6 .7 .8
 do
