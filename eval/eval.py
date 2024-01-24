@@ -25,6 +25,9 @@ import cv2
 import tqdm
 import ipdb
 import warnings
+import pickle
+
+import lpips
 
 #  from pytorch_memlab import set_target_gpu
 #  set_target_gpu(9)
@@ -65,6 +68,12 @@ def extra_args(parser):
         default="",
         help="Path to source view list e.g. src_dvr.txt; if specified, overrides source/P",
     )
+    parser.add_argument(
+        "--use_mipnerf360",
+        action='store_true',
+        default="",
+        help="If true hijack the eval and use the mipnerf360 dataset",
+    )
 
     parser.add_argument(
         "--output",
@@ -75,6 +84,9 @@ def extra_args(parser):
     )
     parser.add_argument(
         "--include_src", action="store_true", help="Include source views in calculation"
+    )
+    parser.add_argument(
+        "--manual_worldscale", default=1.0, help="Include source views in calculation"
     )
     parser.add_argument(
         "--scale", type=float, default=1.0, help="Video scale relative to input size"
@@ -92,7 +104,7 @@ def extra_args(parser):
 
 
 args, conf = util.args.parse_args(
-    extra_args, default_conf="conf/resnet_fine_mv.conf", default_expname="shapenet",
+    extra_args, default_conf="conf/default.conf", default_expname="shapenet",
 )
 args.resume = True
 
@@ -110,6 +122,7 @@ has_output = len(output_dir) > 0
 
 total_psnr = 0.0
 total_ssim = 0.0
+total_lpips = 0.0
 cnt = 0
 
 if has_output:
@@ -184,7 +197,60 @@ rays_spl = []
 src_view_mask = None
 total_objs = len(data_loader)
 
+lpips_vgg = lpips.LPIPS(net="vgg").cuda()
+
 with torch.no_grad():
+    
+    if args.use_mipnerf360:
+        total_objs = 7
+        mipnerf360_dataset_path = "/home/jupyter/mipnerf360_datasets_preprocessed.pkl"
+        with open(mipnerf360_dataset_path, 'rb') as fp:
+            mipnerf360_datasets = pickle.load(fp)
+            
+        scene_uid_to_test_input_idx = {
+            'bicycle': 98,
+            'bonsai': 204,
+            'counter': 95,
+            'garden': 63,
+            'kitchen': 65,
+            'room': 151,
+            'stump': 34
+        }
+            
+        def yield_data():
+            for mipnerf360_dataset_name in scene_uid_to_test_input_idx:
+                mipnerf360_dataset = mipnerf360_datasets[mipnerf360_dataset_name]
+                
+                data = {}
+                data['poses'] = mipnerf360_dataset['extrinsics'][None]
+                data['poses'] = torch.from_numpy(data['poses']).to(torch.float32)
+                
+                data['images'] = mipnerf360_dataset['images'].transpose((0,3,1,2))[None]
+                data['images'] = torch.from_numpy(data['images']).to(torch.float32)
+                
+                data['path'] = [f'rs_dtu_4/DTU/{mipnerf360_dataset_name}']
+                data['source'] = torch.from_numpy(np.array([scene_uid_to_test_input_idx[mipnerf360_dataset_name]]))
+                
+                data['focal'] = [
+                    float(np.linalg.inv(mipnerf360_dataset['intrinsics'][0])[0,0])
+                ]
+
+                debug=False
+                if debug:
+                    print("debuggin!")
+                    data['images'] = data['images'][:,:len(mipnerf360_dataset_name)]
+                    data['poses'] = data['poses'][:, :len(mipnerf360_dataset_name)]
+                    data['source'] *= 0 
+                    
+                data['target_view_mask_init'] = torch.ones(len(data['images'][0]), dtype=torch.bool)
+                
+                yield data
+
+        
+        data_loader = yield_data()
+    else:
+        pass
+    
     for obj_idx, data in enumerate(data_loader):
         print(
             "OBJECT",
@@ -196,6 +262,14 @@ with torch.no_grad():
             "%",
             data["path"][0],
         )
+        
+        # import pdb
+        # pdb.set_trace()
+        
+        data['poses'][:,:,:3,-1] *= float(args.manual_worldscale)
+        if 'source' in data:
+            source = data['source']
+        
         dpath = data["path"][0]
         obj_basename = os.path.basename(dpath)
         cat_name = os.path.basename(os.path.dirname(dpath))
@@ -218,7 +292,7 @@ with torch.no_grad():
                 )
             H, W = Ht, Wt
 
-        if all_rays is None or use_source_lut or args.free_pose:
+        if all_rays is None or use_source_lut or args.free_pose or args.use_mipnerf360:
             if use_source_lut:
                 obj_id = cat_name + "/" + obj_basename
                 source = source_lut[obj_id]
@@ -239,6 +313,9 @@ with torch.no_grad():
             poses = data["poses"][0]  # (NV, 4, 4)
             src_poses = poses[src_view_mask].to(device=device)  # (NS, 4, 4)
 
+            if 'target_view_mask_init' in data:
+                target_view_mask_init = data['target_view_mask_init']
+                
             target_view_mask = target_view_mask_init.clone()
             if not args.include_src:
                 target_view_mask *= ~src_view_mask
@@ -247,6 +324,9 @@ with torch.no_grad():
 
             poses = poses[target_view_mask]  # (NV[-NS], 4, 4)
 
+            # import pdb
+            # pdb.set_trace()
+            
             all_rays = (
                 util.gen_rays(
                     poses.reshape(-1, 4, 4),
@@ -268,6 +348,9 @@ with torch.no_grad():
 
         n_gen_views = len(novel_view_idxs)
 
+        # import pdb
+        # pdb.set_trace()
+        
         net.encode(
             images[src_view_mask].to(device=device).unsqueeze(0),
             src_poses.unsqueeze(0),
@@ -276,6 +359,9 @@ with torch.no_grad():
         )
 
         all_rgb, all_depth = [], []
+        # import pdb
+        # pdb.set_trace()
+        
         for rays in tqdm.tqdm(rays_spl):
             rgb, depth = render_par(rays[None])
             rgb = rgb[0].cpu()
@@ -314,6 +400,7 @@ with torch.no_grad():
 
         curr_ssim = 0.0
         curr_psnr = 0.0
+        curr_lpips = 0.0
         if not args.no_compare_gt:
             images_0to1 = images * 0.5 + 0.5  # (NV, 3, H, W)
             images_gt = images_0to1[target_view_mask]
@@ -336,8 +423,16 @@ with torch.no_grad():
                 psnr = compare_psnr(
                     all_rgb[view_idx], rgb_gt_all[view_idx], data_range=1, 
                 )
+                
+                pred_for_lpips = torch.from_numpy(all_rgb[view_idx][None].transpose((0, 3, 1, 2))).cuda() * 2 - 1
+                gt_for_lpips = torch.from_numpy(rgb_gt_all[view_idx][None].transpose((0, 3, 1, 2))).cuda() * 2 - 1
+                
+                lpips = lpips_vgg(pred_for_lpips, gt_for_lpips)
+                lpips = lpips.item()
+                
                 curr_ssim += ssim
                 curr_psnr += psnr
+                curr_lpips += lpips
 
                 if args.write_compare:
                     out_file = os.path.join(
@@ -348,22 +443,31 @@ with torch.no_grad():
                     imageio.imwrite(out_file, (out_im * 255).astype(np.uint8))
         curr_psnr /= n_gen_views
         curr_ssim /= n_gen_views
+        curr_lpips /= n_gen_views
         curr_cnt = 1
         total_psnr += curr_psnr
         total_ssim += curr_ssim
+        total_lpips += curr_lpips
         cnt += curr_cnt
+        
         if not args.no_compare_gt:
             print(
                 "curr psnr",
                 curr_psnr,
                 "ssim",
                 curr_ssim,
+                "lpips",
+                curr_lpips,
                 "running psnr",
                 total_psnr / cnt,
                 "running ssim",
                 total_ssim / cnt,
+                "running lpips",
+                total_lpips / cnt,
             )
         finish_file.write(
-            "{} {} {} {}\n".format(obj_name, curr_psnr, curr_ssim, curr_cnt)
+            "{} {} {} {} {}\n".format(obj_name, curr_psnr, curr_ssim, curr_lpips, curr_cnt)
         )
-print("final psnr", total_psnr / cnt, "ssim", total_ssim / cnt)
+finish_file.write(
+    "totals: {} {} {}\n".format(total_psnr / cnt, total_ssim / cnt, total_lpips / cnt)
+)
